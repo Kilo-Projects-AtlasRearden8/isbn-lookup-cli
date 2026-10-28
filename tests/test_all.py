@@ -1,5 +1,7 @@
+import json
 import tempfile
 import unittest
+from unittest import mock
 
 from isbnlookup.database import OfflineBookDatabase
 from isbnlookup.export import write_csv
@@ -185,6 +187,73 @@ class LookupTests(unittest.TestCase):
         engine = LookupEngine(database=db, offline=True)
         result = engine.lookup("9780306406157")
         self.assertEqual(result["error"], "not found")
+
+    def _mock_json(self, payload):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = (
+            json.dumps(payload).encode("utf-8")
+        )
+        return response
+
+    def test_online_openlibrary_result(self):
+        with mock.patch("isbnlookup.lookup._fetch_json") as fetch:
+            fetch.side_effect = [
+                {
+                    "title": "Sample Book",
+                    "authors": [{"key": "/authors/OL1A"}],
+                    "publish_date": "2020",
+                },
+                {"name": "Sample Author"},
+                None,  # google books never reached
+            ]
+            engine = LookupEngine(offline=False)
+            result = engine.lookup("9780306406157")
+        self.assertEqual(result["title"], "Sample Book")
+        self.assertEqual(result["author"], "Sample Author")
+        self.assertEqual(result["edition"], "2020")
+        self.assertEqual(result["source"], "openlibrary")
+
+    def test_online_google_books_result(self):
+        with mock.patch("isbnlookup.lookup._fetch_json") as fetch:
+            fetch.side_effect = [
+                None,  # open library
+                {
+                    "items": [
+                        {
+                            "volumeInfo": {
+                                "title": "GB Book",
+                                "authors": ["GB Author"],
+                                "publishedDate": "2019-05-01",
+                            }
+                        }
+                    ]
+                },
+            ]
+            engine = LookupEngine(offline=False)
+            result = engine.lookup("9780306406157")
+        self.assertEqual(result["title"], "GB Book")
+        self.assertEqual(result["author"], "GB Author")
+        self.assertEqual(result["edition"], "2019")
+        self.assertEqual(result["source"], "google-books")
+
+    def test_online_falls_back_to_offline_database(self):
+        db = OfflineBookDatabase()
+        db.records = [
+            {
+                "isbn": "9780306406157",
+                "title": "Offline Book",
+                "author": "Offline Author",
+                "edition": "",
+            }
+        ]
+        db._by_isbn = {r["isbn"]: r for r in db.records}
+        with mock.patch("isbnlookup.lookup._fetch_json") as fetch:
+            fetch.return_value = None  # both online sources fail
+            engine = LookupEngine(database=db, offline=False)
+            result = engine.lookup("9780306406157")
+        self.assertIsNone(result.get("error"))
+        self.assertEqual(result["title"], "Offline Book")
+        self.assertEqual(result["source"], "offline")
 
     def test_export_csv(self):
         import os
